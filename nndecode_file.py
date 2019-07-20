@@ -47,7 +47,7 @@ from nnclient import ParsingClient, TranslateClient
 
 _logging_info_fn = print
 _RETRY_WAIT_TIME = 10  # seconds
-_MAX_ENTRIES_IN_BATCH = 100
+_MAX_ENTRIES_IN_BATCH = 500
 _MAX_RETRIES_IN_ROW = 2
 _DEF_B_SIZE_LINES = 15
 _DEF_B_SIZE_CHARS = 3000
@@ -166,6 +166,62 @@ def batch_by_gen(lines, key, completed, batch_size):
     if len(batch) > 0:
         yield (batch, accum)
 
+def padded_size(batch):
+    w = [estimate_token_count(e[1]) for e in batch]
+    size_padded = max(w) * len(w)
+    return size_padded
+
+def unpadded_size(batch):
+    w = [estimate_token_count(e[1]) for e in batch]
+    return sum(w)
+
+
+def batch_generator(lines, completed, batch_size):
+    """ Batch line stream by batching generator determined
+        by estimated subtoken count such that size of batch (including padding)
+        is less than batch_size.
+        Line stream is reordered before batching. """
+    batch = []
+    accum = 0
+    batch_width = 0
+    for (idx, line, weight) in reorder_by(lines, estimate_token_count, completed=completed):
+        curr_size = batch_width * len(batch)
+        next_size = max(batch_width, weight) * (len(batch) + 1)
+        if curr_size >= batch_size or len(batch) >= _MAX_ENTRIES_IN_BATCH:
+            yield (batch, accum)
+            batch = []
+            batch_width, accum = 0, 0
+        elif next_size >= batch_size:
+            # next line would make batch too large
+            if batch:
+                yield (batch, accum)
+                batch = []
+                batch_width, accum = 0, 0
+            if weight > batch_size:
+                # line is too large
+                end = len(line)
+                end = int(end * 0.9)
+                trunc_line = line[:end]
+                while estimate_token_count(trunc_line) > batch_size:
+                    end = int(end * 0.9)
+                    trunc_line = line[:end]
+                line = trunc_line
+                weight = estimate_token_count(trunc_line)
+        accum += weight
+        batch_width = max(batch_width, weight)
+        batch.append((idx, line))
+    if len(batch) > 0:
+        yield (batch, accum)
+
+
+def chain_split_batch(batch_num, batch, iterator):
+    half = len(batch)//2 + 1
+    split1 = batch[:half]
+    split1 = (batch_num, (split1, unpadded_size(split1)))
+    split2 = batch[half:]
+    split2 = (batch_num, (split2, unpadded_size(split2)))
+    return itertools.chain([split1, split2], iterator)
+
 
 def translate_file(in_path, out_path, verb, batch_size, batch_by):
     """ Translate file pointed to by in_path with translation task
@@ -187,11 +243,13 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
     if remaining_lines <= 0:
         return
 
+    bad_responses_in_row = 0
     skipped = []
     offset = 0
     _logging_info_fn("Submitting batches...")
     with open(in_path, "r") as in_file:
-        batches = enumerate(batch_by_gen(in_file, batch_by, completed, batch_size))
+        # batches = enumerate(batch_by_gen(in_file, batch_by, completed, batch_size))
+        batches = enumerate(batch_generator(in_file, completed, batch_size))
         begin_time = time.time()
         while True:
         # for (batch_num, (batch, b_weight)) in batches:
@@ -204,20 +262,20 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
             except (IOError) as e:
                 import traceback
                 traceback.print_exc()
-                print("Exiting...")
-                sys.exit(0)
-                pass
-            except ValueError as e:
+                if bad_responses_in_row <= 4:
+                    batches = chain_split_batch(batch_num, batch, batches)
+                    time.sleep(1 + bad_responses_in_row * 5)
+                    bad_responses_in_row += 1
+                    continue
+                else:
+                    print("Exiting...")
+                    sys.exit(0)
+            except (KeyError, ValueError) as e:
                 # split batch in two in case its too big
                 print("Batch size too large: splitting batch in two")
                 if len(batch) < 5:
                     continue
-                weigh_fn = lambda x: WEIGHT_FNS[batch_by](x[1])  # (idx, text)
-                half = len(batch)//2 + 1
-                split1, split2 = batch[:half], batch[half:]
-                w1, w2 = sum(map(weigh_fn, split1)), sum(map(weigh_fn, split2))
-                split1, split2 = (batch_num, (split1, w1)), (batch_num, (split2, w2))
-                batches = itertools.chain([split1, split2], batches)
+                batches = chain_split_batch(batch_num, batch, batches)
                 continue
 
             with open(out_path, "a") as out_file:
@@ -234,7 +292,7 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
                 msg = (
                     "Batch {batch_num:>4d}: {batch_lines:4d} lines in {elaps:>5.2f}s, "
                     "{batch_weight:>4d} {keys}, {ms_per_key:>5.2f} ms/{key}, "
-                    "{avg_ms_per_ex:>5.2f} ms/ex"
+                    "{avg_ms_per_ex:>5.2f} ms/ex    (width {width})"
                 )
                 _logging_info_fn(
                     msg.format(
@@ -246,8 +304,10 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
                         batch_weight=b_weight,
                         keys=batch_by,
                         key=batch_by[:-1],
+                        width=max([estimate_token_count(e[1]) for e in batch]),
                     )
                 )
+            bad_responses_in_row = 0
 
     _logging_info_fn("Finished all batches")
     elaps_run_time = datetime.timedelta(0, int(time.time() - begin_time))
