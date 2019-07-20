@@ -168,7 +168,7 @@ def batch_generator(lines, completed, batch_size):
         if (
             curr_size >= batch_size
             or len(batch) >= _MAX_ENTRIES_IN_BATCH
-            or 2 * weight < last_weight
+            or (2 * weight < last_weight and batch)
         ):
             yield (batch, accum)
             batch = []
@@ -206,11 +206,11 @@ def chain_split_batch(batch_num, batch, iterator):
     return itertools.chain([split1, split2], iterator)
 
 
-def translate_file(in_path, out_path, verb, batch_size, batch_by):
+def translate_file(in_path, out_path, verb, batch_size):
     """ Translate file pointed to by in_path with translation task
-        determined by verb. Input is batched according to batch_by with
-        the given batch size. Results are saved to a file pointed to
-        by out_path. """
+        determined by verb. Input is batched such that the padded estimated
+        subtoken count does not exceed batch_size.
+        Results are saved to a file pointed to by out_path. """
     completed = get_completed(out_path)
 
     total_lines = count_lines_in_path(in_path)
@@ -219,7 +219,7 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
 
     _logging_info_fn("Translating {0}".format(in_path))
     _logging_info_fn("Output file is {0}".format(out_path))
-    _logging_info_fn("Batch size is {0} {1}".format(batch_size, batch_by))
+    _logging_info_fn("Batch size is {0} subtokens".format(batch_size))
     _logging_info_fn(
         "Currently {0}/{1} entries are done".format(len(completed), total_lines)
     )
@@ -231,7 +231,6 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
     offset = 0
     _logging_info_fn("Submitting batches...")
     with open(in_path, "r") as in_file:
-        # batches = enumerate(batch_by_gen(in_file, batch_by, completed, batch_size))
         batches = enumerate(batch_generator(in_file, completed, batch_size))
         begin_time = time.time()
         while True:
@@ -274,9 +273,9 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
                 ring.put(s_per_ex, weight=b_weight / len(batch), times=len(batch))
 
                 msg = (
-                    "Batch {batch_num:>4d}: {batch_lines:4d} lines in {elaps:>5.2f}s, "
-                    "{batch_weight:>4d} {keys}, {ms_per_key:>5.2f} ms/{key}, "
-                    "{avg_ms_per_ex:>5.2f} ms/ex    (width {width})"
+                    "Batch {batch_num:>4d}: {batch_lines:4d} lines (width {width:>3d}) in {elaps:>5.2f}s, "
+                    "{batch_weight:>4d} subtokens, {ms_per_key:>6.2f} ms/subtoken, "
+                    "{avg_ms_per_ex:>5.2f} ms/line"
                 )
                 _logging_info_fn(
                     msg.format(
@@ -286,8 +285,6 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
                         ms_per_key=1000 * ring.weighted_average,
                         avg_ms_per_ex=1000 * ring.average,
                         batch_weight=b_weight,
-                        keys=batch_by,
-                        key=batch_by[:-1],
                         width=max([estimate_token_count(e[1]) for e in batch]),
                     )
                 )
@@ -315,8 +312,8 @@ def translate_batch(batch, verb):
     return out_batch
 
 
-def main(in_path, out_path, verb, batch_size, batch_by):
-    translate_file(in_path, out_path, verb, batch_size, batch_by)
+def main(in_path, out_path, verb, batch_size):
+    translate_file(in_path, out_path, verb, batch_size)
 
 
 if __name__ == "__main__":
