@@ -70,6 +70,7 @@ WEIGHT_FNS = dict(
     chars=lambda x: len(x), lines=lambda x: 1, tokens=estimate_token_count
 )
 
+
 class AvgRing:
     """ Ring buffer for keeping track of running averages """
 
@@ -139,37 +140,11 @@ def reorder_by(lines, key_fn, completed=None, mixing_size=1000):
             yield item
 
 
-def batch_by_gen(lines, key, completed, batch_size):
-    """ Batch line stream by batching generator determined
-        by key name with batch size batch_size.
-        Line stream is reordered before batching. """
-    batch = []
-    accum = 0
-    last_weight = float("inf")
-    for (idx, line, weight) in reorder_by(lines, WEIGHT_FNS[key], completed=completed):
-        if batch and weight < 0.5 * last_weight:
-            # Reached end of a bucket of large examples, we really don't
-            # want to mix long examples with lots of very short ones
-            yield (batch, accum)
-            batch = []
-            accum = 0
-        if len(batch) >= _MAX_ENTRIES_IN_BATCH or (
-            batch and accum + weight > batch_size
-        ):
-            # Batch is not empty and would be overfull with next entry
-            yield (batch, accum)
-            batch = []
-            accum = 0
-        accum += weight
-        last_weight = weight
-        batch.append((idx, line))
-    if len(batch) > 0:
-        yield (batch, accum)
-
 def padded_size(batch):
     w = [estimate_token_count(e[1]) for e in batch]
     size_padded = max(w) * len(w)
     return size_padded
+
 
 def unpadded_size(batch):
     w = [estimate_token_count(e[1]) for e in batch]
@@ -184,10 +159,17 @@ def batch_generator(lines, completed, batch_size):
     batch = []
     accum = 0
     batch_width = 0
-    for (idx, line, weight) in reorder_by(lines, estimate_token_count, completed=completed):
+    last_weight = batch_size
+    for (idx, line, weight) in reorder_by(
+        lines, estimate_token_count, completed=completed
+    ):
         curr_size = batch_width * len(batch)
         next_size = max(batch_width, weight) * (len(batch) + 1)
-        if curr_size >= batch_size or len(batch) >= _MAX_ENTRIES_IN_BATCH:
+        if (
+            curr_size >= batch_size
+            or len(batch) >= _MAX_ENTRIES_IN_BATCH
+            or 2 * weight < last_weight
+        ):
             yield (batch, accum)
             batch = []
             batch_width, accum = 0, 0
@@ -208,6 +190,7 @@ def batch_generator(lines, completed, batch_size):
                 line = trunc_line
                 weight = estimate_token_count(trunc_line)
         accum += weight
+        last_weight = weight
         batch_width = max(batch_width, weight)
         batch.append((idx, line))
     if len(batch) > 0:
@@ -215,7 +198,7 @@ def batch_generator(lines, completed, batch_size):
 
 
 def chain_split_batch(batch_num, batch, iterator):
-    half = len(batch)//2 + 1
+    half = len(batch) // 2 + 1
     split1 = batch[:half]
     split1 = (batch_num, (split1, unpadded_size(split1)))
     split2 = batch[half:]
@@ -252,7 +235,7 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
         batches = enumerate(batch_generator(in_file, completed, batch_size))
         begin_time = time.time()
         while True:
-        # for (batch_num, (batch, b_weight)) in batches:
+            # for (batch_num, (batch, b_weight)) in batches:
             batch_num, (batch, b_weight) = next(batches)
             batch_begin_btime = time.time()
             _ = 1 + 1
@@ -261,6 +244,7 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
                 out_batch = sorted(out_batch, key=lambda x: x[0])
             except (IOError) as e:
                 import traceback
+
                 traceback.print_exc()
                 if bad_responses_in_row <= 4:
                     batches = chain_split_batch(batch_num, batch, batches)
@@ -369,19 +353,11 @@ if __name__ == "__main__":
         dest="BATCH_SIZE",
         type=int,
         required=False,
-        help="Batch size, default is {0} lines".format(_DEF_B_SIZE_LINES),
-    )
-    parser.add_argument(
-        "--batch_by",
-        dest="BATCH_BY",
-        choices=["chars", "lines", "tokens"],
-        default="tokens",
-        type=str,
-        required=False,
-        help="Set which unit to batch by, defaults to approximate subtoken count.",
+        help="Batch size defaults to {0} (padded) approximate subtokens".format(
+            _DEF_B_SIZE_LINES
+        ),
     )
 
     args = parser.parse_args()
-    batch_size = args.BATCH_SIZE or _DEFAULT_BATCH_SIZE[args.BATCH_BY]
 
-    main(args.IN_FILE, args.OUT_FILE, args.VERB, batch_size, args.BATCH_BY)
+    main(args.IN_FILE, args.OUT_FILE, args.VERB, args.BATCH_SIZE)
