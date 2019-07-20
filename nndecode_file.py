@@ -39,6 +39,8 @@ import os
 import re
 from subprocess import PIPE, run
 import time
+import itertools
+import sys
 
 from nnclient import ParsingClient, TranslateClient
 
@@ -46,7 +48,7 @@ from nnclient import ParsingClient, TranslateClient
 _logging_info_fn = print
 _RETRY_WAIT_TIME = 10  # seconds
 _MAX_ENTRIES_IN_BATCH = 100
-_MAX_RETRIES_IN_ROW = 3
+_MAX_RETRIES_IN_ROW = 2
 _DEF_B_SIZE_LINES = 15
 _DEF_B_SIZE_CHARS = 3000
 _DEF_B_SIZE_TOKS = 1500
@@ -55,8 +57,21 @@ _DEFAULT_BATCH_SIZE = dict(
 )
 
 
+def estimate_token_count(line):
+    """ Estimates subtoken count in line as used in
+        the tensor2tensor's SubwordTextEncoder. """
+    pattern = r"([\w0-9]{1,6}|[^ \w0-9])"
+    subtoken = re.compile(pattern, re.IGNORECASE)
+    matches = subtoken.findall(line)
+    return len(matches)
+
+
+WEIGHT_FNS = dict(
+    chars=lambda x: len(x), lines=lambda x: 1, tokens=estimate_token_count
+)
+
 class AvgRing:
-    """ Ring buffer of for keeping track of running averages """
+    """ Ring buffer for keeping track of running averages """
 
     def __init__(self, maxsize):
         self._ring = dict()
@@ -131,10 +146,7 @@ def batch_by_gen(lines, key, completed, batch_size):
     batch = []
     accum = 0
     last_weight = float("inf")
-    key_fns = dict(
-        chars=lambda x: len(x), lines=lambda x: 1, tokens=estimate_token_count
-    )
-    for (idx, line, weight) in reorder_by(lines, key_fns[key], completed=completed):
+    for (idx, line, weight) in reorder_by(lines, WEIGHT_FNS[key], completed=completed):
         if batch and weight < 0.5 * last_weight:
             # Reached end of a bucket of large examples, we really don't
             # want to mix long examples with lots of very short ones
@@ -155,15 +167,6 @@ def batch_by_gen(lines, key, completed, batch_size):
         yield (batch, accum)
 
 
-def estimate_token_count(line):
-    """ Estimates subtoken count in line as used in
-        the tensor2tensor's SubwordTextEncoder. """
-    pattern = "([\w0-9]{1,6}|[^ \w0-9])"
-    subtoken = re.compile(pattern, re.IGNORECASE)
-    matches = subtoken.findall(line)
-    return len(matches)
-
-
 def translate_file(in_path, out_path, verb, batch_size, batch_by):
     """ Translate file pointed to by in_path with translation task
         determined by verb. Input is batched according to batch_by with
@@ -173,7 +176,7 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
 
     total_lines = count_lines_in_path(in_path)
     remaining_lines = total_lines - len(completed)
-    ring = AvgRing(maxsize=100)
+    ring = AvgRing(maxsize=10)
 
     _logging_info_fn("Translating {0}".format(in_path))
     _logging_info_fn("Output file is {0}".format(out_path))
@@ -184,32 +187,38 @@ def translate_file(in_path, out_path, verb, batch_size, batch_by):
     if remaining_lines <= 0:
         return
 
-    messaged = False
+    skipped = []
+    offset = 0
+    _logging_info_fn("Submitting batches...")
     with open(in_path, "r") as in_file:
         batches = enumerate(batch_by_gen(in_file, batch_by, completed, batch_size))
         begin_time = time.time()
-        for (batch_num, (batch, b_weight)) in batches:
-            if not messaged:
-                _logging_info_fn("Submitting batches...")
-                messaged = True
+        while True:
+        # for (batch_num, (batch, b_weight)) in batches:
+            batch_num, (batch, b_weight) = next(batches)
             batch_begin_btime = time.time()
-            retries_in_row = 0
-            while retries_in_row < _MAX_RETRIES_IN_ROW:
-                try:
-                    if retries_in_row > 0:
-                        time.sleep(_RETRY_WAIT_TIME)
-                        _logging_info_fn("Retrying...")
-                    out_batch = translate_batch(batch, verb)
-                    break
-                except Exception as e:
-                    logging.exception(e)
-                    retries_in_row += 1
-                    if retries_in_row >= _MAX_RETRIES_IN_ROW:
-                        import traceback
-
-                        traceback.print_exc()
-                        _logging_info_fn("Maximum retries reached, exiting.")
-                        return
+            _ = 1 + 1
+            try:
+                out_batch = translate_batch(batch, verb)
+                out_batch = sorted(out_batch, key=lambda x: x[0])
+            except (IOError) as e:
+                import traceback
+                traceback.print_exc()
+                print("Exiting...")
+                sys.exit(0)
+                pass
+            except ValueError as e:
+                # split batch in two in case its too big
+                print("Batch size too large: splitting batch in two")
+                if len(batch) < 5:
+                    continue
+                weigh_fn = lambda x: WEIGHT_FNS[batch_by](x[1])  # (idx, text)
+                half = len(batch)//2 + 1
+                split1, split2 = batch[:half], batch[half:]
+                w1, w2 = sum(map(weigh_fn, split1)), sum(map(weigh_fn, split2))
+                split1, split2 = (batch_num, (split1, w1)), (batch_num, (split2, w2))
+                batches = itertools.chain([split1, split2], batches)
+                continue
 
             with open(out_path, "a") as out_file:
                 for (idx, outputs, scores) in out_batch:
