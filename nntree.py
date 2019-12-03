@@ -173,7 +173,7 @@ def flat_is_left_nonterminal(string):
 
 
 def flat_is_right_nonterminal(string):
-    return flat_is_nonterminal(string) and "/" not in string
+    return flat_is_nonterminal(string) and "/" in string
 
 
 def flat_matching_nonterminal(string):
@@ -235,6 +235,7 @@ def parse_flat_tree_to_nodes(parse_toks, text_toks=None, verbose=False):
             not flat_is_right_nonterminal(tok)
             or flat_matching_nonterminal(parent.name) != tok
         ):
+            import pdb; pdb.set_trace()
             msg = "Error: Found illegal nonterminal {}, expected right nonterminal"
             vprint(msg.format(tok))
 
@@ -650,16 +651,18 @@ def test_merge_person():
 
 
 def test_flat_fns():
-    nonterms = ["P", "S0", "NP-SUBJ"]
-    for nt in nonterms:
-        assert flat_is_nonterminal(nt), "{} should be nonterminal".format(nt)
-    match = ["/NP-SUBJ", "NP-SUBJ"]
-    assert flat_matching_nonterminal(match[0]) == match[1], "{} should match {}".format(
-        *match
-    )
-    assert flat_matching_nonterminal(match[1]) == match[0], "{} should match {}".format(
-        *match
-    )
+    nonterms1 = ["P", "S0", "NP-SUBJ"]
+    nonterms2 = ["/P", "/S0", "/NP-SUBJ"]
+    for nt1, nt2 in zip(nonterms1, nonterms2):
+        assert flat_is_nonterminal(nt1), "{} should be nonterminal".format(nt1)
+        assert flat_is_left_nonterminal(nt1), "{} should be left nonterminal".format(nt1)
+        assert flat_is_right_nonterminal(nt2), "{} should be right nonterminal".format(nt2)
+        assert flat_matching_nonterminal(nt1) == nt2, "{} should match {}".format(
+            nt1, nt2
+        )
+        assert flat_matching_nonterminal(nt2) == nt1, "{} should match {}".format(
+            nt2, nt1
+        )
     terms = ["so_1_nf_et_fh_gm_nt_p3", "lo_et_hk_þf", "tö"]
     for term in terms:
         assert flat_is_terminal(term), "{} should be terminal".format(term)
