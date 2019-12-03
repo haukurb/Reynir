@@ -3,7 +3,7 @@
 """
     Reynir: Natural language processing for Icelandic
 
-    Neural Network Utilities
+    Neural Network Parsing Utilities
 
     Copyright (C) 2018 Miðeind ehf
 
@@ -33,13 +33,8 @@ from pprint import pprint
 import inspect
 
 import tokenizer
-import GRAMMAR
 from reynir import matcher
 from reynir import bintokenizer
-from parsing_subtokens import ParsingSubtokens, MISSING
-
-
-TOKENS = ParsingSubtokens()
 
 
 class GRAMMAR:
@@ -165,6 +160,28 @@ class ParseResult(IntEnum):
     FAILURE = 8
 
 
+def flat_is_nonterminal(string):
+    return string.isupper() and "_" not in string
+
+
+def flat_is_terminal(string):
+    return string.islower()
+
+
+def flat_is_left_nonterminal(string):
+    return flat_is_nonterminal(string) and "/" not in string
+
+
+def flat_is_right_nonterminal(string):
+    return flat_is_nonterminal(string) and "/" not in string
+
+
+def flat_matching_nonterminal(string):
+    if "/" in string:
+        return string[1:]
+    return "/" + string
+
+
 def parse_flat_tree_to_nodes(parse_toks, text_toks=None, verbose=False):
     """Parses list of toks (parse_toks) into a legal tree structure or None,
        If the corresponding tokenized source text is provided, it is
@@ -172,7 +189,7 @@ def parse_flat_tree_to_nodes(parse_toks, text_toks=None, verbose=False):
 
     vprint = logging.debug if verbose else (lambda *ar, **kw: None)
 
-    if not parse_toks or parse_toks[0] not in TOKENS.NONTERMINALS:
+    if not parse_toks or not flat_is_nonterminal(parse_toks[0]):
         raise ValueError("Invalid parse tokens.")
 
     root = Node(name="ROOT", is_terminal=False)  # Pseudo root
@@ -181,10 +198,7 @@ def parse_flat_tree_to_nodes(parse_toks, text_toks=None, verbose=False):
     txt_count = 0
 
     for idx, tok in enumerate(parse_toks):
-        if tok in MISSING:
-            vprint("Encountered missing token: '{}'".format(tok))
-            continue
-        if tok not in TOKENS.NONTERMINALS:
+        if flat_is_terminal(tok):
             if parent == root:
                 msg = "Error: Tried to parse terminal node {} as descendant of root."
                 vprint(msg.format(tok))
@@ -206,8 +220,7 @@ def parse_flat_tree_to_nodes(parse_toks, text_toks=None, verbose=False):
             parent.add_child(new_node)
             continue
 
-        # tok is in TOKENS.NONTERMINALS and therefore is either a left or right nonterminal token
-        if tok in TOKENS.NONTERM_L:
+        if flat_is_left_nonterminal(tok):
             new_node = Node(tok, is_terminal=False)
             parent.add_child(new_node)
             stack.append(parent)
@@ -218,7 +231,10 @@ def parse_flat_tree_to_nodes(parse_toks, text_toks=None, verbose=False):
 
         # Token must be a legal right nonterminal since it is not a left token
         # A right token must be matched by its corresponding left token
-        if tok not in TOKENS.R_TO_L or parent.name != TOKENS.R_TO_L[tok]:
+        if (
+            not flat_is_right_nonterminal(tok)
+            or flat_matching_nonterminal(parent.name) != tok
+        ):
             msg = "Error: Found illegal nonterminal {}, expected right nonterminal"
             vprint(msg.format(tok))
 
@@ -440,11 +456,8 @@ def tokenize_and_merge_possible_mw_tokens(text, flat_tree):
         if merge_info is not None:
             merge_list.append(merge_info)
 
-    # merge in reverse order so we don't have to compute offets
+    # merge in reverse order so we don't have to compute offsets
     for (pidx, tidx, weight) in reversed(merge_list):
-        print("merging:")
-        print(parse_tokens[pidx : pidx + 1])
-        print([" ".join(sw_tokens[tidx : tidx + weight])])
         parse_tokens[pidx : pidx + weight] = parse_tokens[pidx : pidx + 1]
         sw_tokens[tidx : tidx + weight] = [" ".join(sw_tokens[tidx : tidx + weight])]
 
@@ -476,7 +489,7 @@ def check_merge_candidate(idxed_mw_token, parse_tokens, term_idx_to_parse_idx):
     return (first_pidx, token_idxs[0], len(idxed_mw_token))
 
 
-def test_reynir_dict_format():
+def debug_reynir_dict_format():
     from reynir import Reynir
 
     parser = Reynir()
@@ -500,7 +513,7 @@ def test_reynir_dict_format():
     print()
 
 
-def test_reynir_terminal():
+def debug_reynir_terminal():
     text_tok = "hún"
     from reynir import Reynir
     from reynir.matcher import SimpleTree
@@ -530,12 +543,8 @@ def test_reynir_terminal():
     print(stree)
     pprint(stree._head)
 
-    # print("flat tree as SimpleTree")
-    # stree = SimpleTree([dtree])
-    # print(stree)
 
-
-def test_nntree_terminal():
+def debug_nntree_terminal():
     text_tok = "hún"
     parse_tok = "pfn_kvk_et_nf"
     from reynir.matcher import SimpleTree
@@ -557,7 +566,7 @@ def test_nntree_terminal():
     print()
 
 
-def test_parse_with_text():
+def debug_parse_with_text():
     from reynir.matcher import SimpleTree
 
     text = "hún fer"
@@ -583,7 +592,7 @@ def test_parse_with_text():
     print(SimpleTree([[dtree]])._view(1))
 
 
-def test_nntree_to_simple_tree():
+def debug_nntree_to_simple_tree():
     from reynir.matcher import SimpleTree
 
     text = "hún fer"
@@ -605,7 +614,7 @@ def test_nntree_to_simple_tree():
     print()
 
 
-def test_parse():
+def debug_parse():
     from reynir.matcher import SimpleTree
 
     # flat tree from reynir.Reynir()
@@ -637,16 +646,34 @@ def test_merge_person():
     text = "Þetta er í fimmta sinn sem málið er lagt fram en upphaflega flutti málið núverandi hæstv. dómsmálaráðherra, Áslaug Arna Sigurbjörnsdóttir, og hefur hún verið fyrsti flutningsmaður að málinu hingað til, en við sem flytjum það núna eru Vilhjálmur Árnason, Óli Björn Kárason, Páll Magnússon, Njáll Trausti Friðbertsson, Bryndís Haraldsdóttir, Brynjar Níelsson, Ásmundur Friðriksson og Jón Gunnarsson."
     flat_tree = "S0 S-MAIN IP NP-SUBJ fn_et_hk_nf /NP-SUBJ VP VP so_1_nf_et_fh_gm_nt_p3 /VP PP P fs_þf /P NP lo_et_hk_þf no_et_hk_þf CP-REL C stt /C IP S-MAIN VP NP-PRD no_et_gr_hk_nf /NP-PRD VP so_1_nf_et_fh_gm_nt_p3 /VP NP-PRD VP so_et_hk_lhþt_nf_sb /VP /NP-PRD /VP ADVP ao /ADVP /S-MAIN /IP C st /C IP S-MAIN ADVP ao /ADVP VP VP so_1_þf_et_fh_gm_p3_þt /VP NP-OBJ no_et_gr_hk_þf NP-POSS lo_ef_et_kk_sb lo_ef_et_kk no_ef_et_kk p S-MAIN IP NP-SUBJ person_kvk_nf person_kvk_nf person_kvk_nf p S-MAIN IP ADVP ao /ADVP VP VP VP-AUX so_et_fh_gm_nt_p3 /VP-AUX NP-SUBJ pfn_et_kvk_nf_p3 /NP-SUBJ VP VP so_1_nf_gm_sagnb /VP NP-PRD lo_et_kk_nf_vb no_et_kk_nf /NP-PRD /VP /VP PP P fs_þgf /P NP no_et_gr_hk_þgf /NP /PP ADVP ao ao /ADVP /VP /IP /S-MAIN p C st /C pfn_ft_nf_p1 CP-REL C stt /C IP S-MAIN VP VP so_1_þf_fh_ft_gm_nt_p1 /VP NP-OBJ pfn_et_hk_p3_þf /NP-OBJ /VP ADVP ao /ADVP /S-MAIN /IP /CP-REL /NP-SUBJ VP VP so_1_nf_fh_ft_gm_nt_p3 /VP NP-PRD person_kk_nf person_kk_nf /NP-PRD /VP /IP /S-MAIN p /NP-POSS /NP-OBJ /VP /S-MAIN /IP /CP-REL /NP /PP NP-PRD person_kk_nf person_kk_nf person_kk_nf p person_kk_nf person_kk_nf p person_kk_nf person_kk_nf person_kk_nf p person_kvk_nf person_kvk_nf p person_kk_nf person_kk_nf p person_kk_nf person_kk_nf C st /C person_kk_nf person_kk_nf /NP-PRD /VP /IP /S-MAIN p /S0"
     text_toks, parse_toks = tokenize_and_merge_possible_mw_tokens(text, flat_tree)
-    assert len(text_toks) == 9
+    assert len(text_toks) == 54
+
+
+def test_flat_fns():
+    nonterms = ["P", "S0", "NP-SUBJ"]
+    for nt in nonterms:
+        assert flat_is_nonterminal(nt), "{} should be nonterminal".format(nt)
+    match = ["/NP-SUBJ", "NP-SUBJ"]
+    assert flat_matching_nonterminal(match[0]) == match[1], "{} should match {}".format(
+        *match
+    )
+    assert flat_matching_nonterminal(match[1]) == match[0], "{} should match {}".format(
+        *match
+    )
+    terms = ["so_1_nf_et_fh_gm_nt_p3", "lo_et_hk_þf", "tö"]
+    for term in terms:
+        assert flat_is_terminal(term), "{} should be terminal".format(term)
 
 
 if __name__ == "__main__":
-    # test_parse()
-    # test_reynir_dict_format()
-    # test_parse_with_text()
-    # test_reynir_terminal()
-    # test_nntree_terminal()
-    # test_nntree_to_simple_tree()
+    logging.getLogger("").setLevel(logging.DEBUG)
+    test_flat_fns()
     test_merge_person()
+
+    # debug_reynir_dict_format()
+    # debug_parse_with_text()
+    # debug_reynir_terminal()
+    # debug_nntree_terminal()
+    # debug_nntree_to_simple_tree()
 
     pass
