@@ -73,7 +73,8 @@ _PROJECT_PATH = os.path.join(_NNSERVER_PATH, "greynir")
 _PARSING_VOCAB_PATH = os.path.join(
     _PROJECT_PATH, "resources", "parsing_tokens_180729.txt"
 )
-_ENIS_VOCAB_PATH = os.path.join(_PROJECT_PATH, "resources", "vocab.enis.16384.subwords")
+# _ENIS_VOCAB_PATH = os.path.join(_PROJECT_PATH, "resources", "vocab.enis.16384.subwords")
+_ENIS_VOCAB_PATH = os.path.join(_PROJECT_PATH, "resources", "vocab.translate_enis16k.16384.subwords")
 
 
 app = Flask(__name__)
@@ -184,7 +185,8 @@ class TranslateServer(NnServer):
 
     src_enc = text_encoder.SubwordTextEncoder(_ENIS_VOCAB_PATH)
     tgt_enc = src_enc
-    _model_name = "translate"
+    # _model_name = "translate"
+    _model_name = "translate_v2"
 
 
 @app.route("/parse.api", methods=["POST"])

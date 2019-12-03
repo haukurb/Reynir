@@ -47,6 +47,7 @@ from nnclient import ParsingClient, TranslateClient
 
 _logging_info_fn = print
 _RETRY_WAIT_TIME = 10  # seconds
+_MAX_LINE_LENGTH_CHARS = 1500
 _MAX_ENTRIES_IN_BATCH = 500
 _MAX_RETRIES_IN_ROW = 2
 _DEF_B_SIZE_LINES = 15
@@ -163,6 +164,8 @@ def batch_generator(lines, completed, batch_size):
     for (idx, line, weight) in reorder_by(
         lines, estimate_token_count, completed=completed
     ):
+        if len(line) > _MAX_LINE_LENGTH_CHARS:
+            line = ""
         curr_size = batch_width * len(batch)
         next_size = max(batch_width, weight) * (len(batch) + 1)
         if (
@@ -198,12 +201,24 @@ def batch_generator(lines, completed, batch_size):
 
 
 def chain_split_batch(batch_num, batch, iterator):
-    half = len(batch) // 2 + 1
+    half = len(batch) // 2
     split1 = batch[:half]
     split1 = (batch_num, (split1, unpadded_size(split1)))
     split2 = batch[half:]
     split2 = (batch_num, (split2, unpadded_size(split2)))
     return itertools.chain([split1, split2], iterator)
+
+
+def tsv_splitter(lines):
+    """ Return line if it is only one field in tsv format, otherwise field 2"""
+    line = next(lines)
+    lines = itertools.chain([line], lines)
+    if "\t" not in line:
+        yield from lines
+    else:
+        for line in lines:
+            segment_id, text, *rest = line.split("\t", 3)
+            yield text
 
 
 def translate_file(in_path, out_path, verb, batch_size):
@@ -219,26 +234,27 @@ def translate_file(in_path, out_path, verb, batch_size):
 
     _logging_info_fn("Translating {0}".format(in_path))
     _logging_info_fn("Output file is {0}".format(out_path))
+    if remaining_lines <= 0:
+        _logging_info_fn("Done")
+        return
     _logging_info_fn("Batch size is {0} subtokens".format(batch_size))
     _logging_info_fn(
         "Currently {0}/{1} entries are done".format(len(completed), total_lines)
     )
-    if remaining_lines <= 0:
-        return
 
     bad_responses_in_row = 0
     skipped = []
     offset = 0
+    running = True
     _logging_info_fn("Submitting batches...")
     with open(in_path, "r") as in_file:
-        batches = enumerate(batch_generator(in_file, completed, batch_size))
+        line_gen = tsv_splitter(in_file)
+        batches = enumerate(batch_generator(line_gen, completed, batch_size))
         begin_time = time.time()
-        while True:
-            # for (batch_num, (batch, b_weight)) in batches:
-            batch_num, (batch, b_weight) = next(batches)
+        while running:
             batch_begin_btime = time.time()
-            _ = 1 + 1
             try:
+                batch_num, (batch, b_weight) = next(batches)
                 out_batch = translate_batch(batch, verb)
                 out_batch = sorted(out_batch, key=lambda x: x[0])
             except (IOError) as e:
@@ -253,13 +269,18 @@ def translate_file(in_path, out_path, verb, batch_size):
                 else:
                     print("Exiting...")
                     sys.exit(0)
-            except (KeyError, ValueError) as e:
+            except (TypeError, KeyError, ValueError) as e:
                 # split batch in two in case its too big
                 print("Batch size too large: splitting batch in two")
-                if len(batch) < 5:
+                if len(batch) < 2:
                     continue
                 batches = chain_split_batch(batch_num, batch, batches)
                 continue
+            except StopIteration as e:
+                running = False
+                continue
+
+
 
             with open(out_path, "a") as out_file:
                 for (idx, outputs, scores) in out_batch:
